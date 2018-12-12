@@ -27,7 +27,8 @@ smoke_test = 'CI' in os.environ
 
 ########################################################################
 
-class ckd_Dataset(Dataset): #Combines a dataset and a sampler, and provides iterators over the dataset
+class ckd_Dataset(Dataset):
+#Combines a dataset and a sampler, and provides iterators over the dataset
     def __init__(self, fname):
     	data_np = np.genfromtxt(fname, delimiter=',')
     	data_torch = Variable(torch.FloatTensor(data_np))
@@ -37,7 +38,9 @@ class ckd_Dataset(Dataset): #Combines a dataset and a sampler, and provides iter
     def __getitem__(self, idx):
         return self.data[idx]
 
+####################
 # load ckd dataset
+####################
 def ckd_setup_data_loaders(batch_size=39, use_cuda=False):
 	# use scaled data (mean=0, cov=1)
     train_unlab_set = ckd_Dataset('../train_data_unlab_scaled.csv') 
@@ -54,11 +57,14 @@ def ckd_setup_data_loaders(batch_size=39, use_cuda=False):
     test_loader = DataLoader(dataset=test_set,
         batch_size=batch_size, shuffle=False)
 
-    # added val_loader
+    # added val_loader, and split train into labelled and unlabelled parts
     return train_unlab_loader, train_lab_loader, val_loader, test_loader
 
 ########################################################################
 
+###################
+# decoder network
+###################
 class Decoder(nn.Module):
     def __init__(self, z_dim, hidden_dim):
         super(Decoder, self).__init__()
@@ -71,28 +77,23 @@ class Decoder(nn.Module):
         self.fc22 = nn.Linear(hidden_dim, 1335)
         # setup the non-linearities
         self.softplus = nn.Softplus()
-        # self.sigmoid = nn.Sigmoid()
 
     def forward(self, z):
         # define the forward computation on the latent z
         # first compute the hidden units
         hidden = self.softplus(self.fc1(z))
-        # return the parameter for the output Bernoulli
-        # each is of size batch_size x 1335
-        # change return value to parameter for the output Normal
-        # loc_img = self.sigmoid(self.fc21(hidden))
-        # return loc_img
 
         # return a mean vector and a (positive) square root covariance
         recon_loc = self.fc21(hidden)
-        # recon_scale = torch.exp(self.fc22(hidden))
-
-        # try softplus instead of exp
+        # use softplus instead of exp to avoid overflow in gradients
         recon_scale = 1e-6 + self.softplus(self.fc22(hidden))
         return recon_loc, recon_scale
 
 ########################################################################
 
+###################
+# encoder network
+###################
 class Encoder(nn.Module):
     def __init__(self, z_dim, hidden_dim):
         super(Encoder, self).__init__()
@@ -105,25 +106,26 @@ class Encoder(nn.Module):
 
     def forward(self, x):
         # define the forward computation on the image x
-        # first shape the mini-batch to have pixels in the rightmost dimension
+        # shape the mini-batch to be in rightmost dimension
         x = x.reshape(-1, 1335)
         # then compute the hidden units
         hidden = self.softplus(self.fc1(x))
         # then return a mean vector and a (positive) square root covariance
         # each of size batch_size x z_dim
         z_loc = self.fc21(hidden)
-        # z_scale = torch.exp(self.fc22(hidden))
-
-        # try softplus instead of exp
+        # use softplus instead of exp to avoid overflow in gradients
         z_scale = 1e-6 + self.softplus(self.fc22(hidden))
         return z_loc, z_scale
 
 ########################################################################
 
+#######
+# VAE
+#######
+
 class VAE(nn.Module):
-    # by default our latent space is 50-dimensional
-    # and we use 400 hidden units
-    # changed z_dim to 1 (severity score 1 dim)
+    # 400 hidden units
+    # changed z_dim to 1 (severity score is 1 dimenstional)
     def __init__(self, z_dim=1, hidden_dim=400, use_cuda=False):
         super(VAE, self).__init__()
         # create the encoder and decoder networks
@@ -137,7 +139,9 @@ class VAE(nn.Module):
         self.use_cuda = use_cuda
         self.z_dim = z_dim
 
+    ###############################
     # define the model p(x|z)p(z)
+    ###############################
     def model(self, x, unlab, label):
         # register PyTorch module `decoder` with Pyro
         pyro.module("decoder", self.decoder)
@@ -147,30 +151,35 @@ class VAE(nn.Module):
                 # setup hyperparameters for prior p(z)
                 z_loc = x.new_zeros(torch.Size((x.shape[0], self.z_dim)))
                 z_scale = x.new_ones(torch.Size((x.shape[0], self.z_dim)))
+
                 # sample from prior (value will be sampled by guide when computing the ELBO)
                 z = pyro.sample("latent", dist.Normal(z_loc, z_scale).independent(1))
-                # decode the latent code z
-                # loc_img = self.decoder.forward(z)
-                # score against actual images
-                # pyro.sample("obs", dist.Bernoulli(loc_img).independent(1), obs=x.reshape(-1, 1335))
 
                 # decoder outputs mean and sqroot cov, sample from normal
                 recon_loc, recon_scale = self.decoder.forward(z)
                 pyro.sample("obs", dist.Normal(recon_loc, recon_scale).independent(1), obs=x.reshape(-1, 1335))
+            
             # for labelled data, 
             else:
-                # check if 0 or 5
+                # check if stage 0 or stage 5
                 if label == 0:
+                    # for stage 0, want to anchor severity score on lower bound
+                    # sample from N(-3, 0.1)
                     z_loc = torch.Tensor([[-3],[-3],[-3]])
                 if label == 5:
+                    # for stage 5, want to anchor severity score on upper bound
+                    # sample from N(3, 0.1)
                     z_loc = torch.Tensor([[3],[3],[3]])
 
                 z_scale = torch.Tensor([[0.1],[0.1],[0.1]])
+
                 z = pyro.sample("latent", dist.Normal(z_loc, z_scale).independent(1))
                 recon_loc, recon_scale = self.decoder.forward(z)
                 pyro.sample("obs", dist.Normal(recon_loc, recon_scale).independent(1), obs=x.reshape(-1, 1335))
 
+    ###########################################################
     # define the guide (i.e. variational distribution) q(z|x)
+    ###########################################################
     def guide(self, x, unlab, label):
         # register PyTorch module `encoder` with Pyro
         pyro.module("encoder", self.encoder)
@@ -179,42 +188,54 @@ class VAE(nn.Module):
                 # use the encoder to get the parameters used to define q(z|x)
                 z_loc, z_scale = self.encoder.forward(x)
 
-                # print z_scale
                 # sample the latent code z
                 pyro.sample("latent", dist.Normal(z_loc, z_scale).independent(1))
             else:
-                # check if 0 or 5
+                # still pass data through encoder then compare to label
+                z_loc, z_scale = self.encoder.forward(x)
+
+                # check if 0 or 5, replace with label
                 if label == 0:
-                    z_loc = torch.Tensor([[-3],[-3],[-3]])
+                    z_lab = torch.Tensor([[-3],[-3],[-3]])
+                    z_loc = torch.min(z_lab, z_loc)
+
                 if label == 5:
-                    z_loc = torch.Tensor([[3],[3],[3]])
-                z_scale = torch.Tensor([[0.1],[0.1],[0.1]])
+                    z_lab = torch.Tensor([[3],[3],[3]])
+                    z_loc = torch.max(z_lab, z_loc)
+
+                # replace prev zscale with 0.1
+                # z_scale = torch.Tensor([[0.1],[0.1],[0.1]])
+                z_scale = z_scale * 0 + 0.1
+
                 pyro.sample("latent", dist.Normal(z_loc, z_scale).independent(1))
 
-    # define a helper function for reconstructing images
+    #############################################
+    # helper function for reconstructing images
+    #############################################
     def reconstruct_img(self, x):
         # encode image x
         z_loc, z_scale = self.encoder(x)
         # sample in latent space
         z = dist.Normal(z_loc, z_scale).sample()
-        # decode the image (note we don't sample in image space)
-        # loc_img = self.decoder(z)
-        # return loc_img
 
-        # output loc and scale then sample from normal
+        # output recon loc and scale then sample from normal
         recon_loc, recon_scale = self.decoder(z)
         loc = dist.Normal(recon_loc, recon_scale).sample()
         return loc
 
 ########################################################################
-# train now takes in both unlab loader and lab loader
+
+##################
+# train function
+##################
+
+# now takes in both unlab loader and lab loader
 def train(svi, train_unlab_loader, train_lab_loader, use_cuda=False):
     # initialize loss accumulator
     epoch_loss = 0.
-    # do a training epoch over each mini-batch x returned
-    # by the data loader
+    # do a training epoch over each mini-batch x returned by the data loader
 
-    # train_loader only has 1 item (also test_loader)
+    # modified to account for train_loader only having 1 item (also test_loader)
     for x in train_unlab_loader:
         # if on GPU put mini-batch into CUDA memory
         if use_cuda:
@@ -222,17 +243,16 @@ def train(svi, train_unlab_loader, train_lab_loader, use_cuda=False):
         # do ELBO gradient and accumulate loss
         epoch_loss += svi.step(x, True, None)
 
-    # add another for loop for labelled data
-    # keep track of which labels (first 120 are 0, last 120 are 5)
+    # added another for loop for labelled data
+    # keep track of which labels (*first 120 are 0, last 120 are 5*)
     count = 0
     for x in train_lab_loader:
         # if on GPU put mini-batch into CUDA memory
         if use_cuda:
             x = x.cuda()
 
-        # if first half, pass in 0 otherwise 5
+        # if first half, pass in 0 into step otherwise 5
         if count < 120:
-            # do ELBO gradient and accumulate loss
             epoch_loss += svi.step(x, False, 0)
         else:
             epoch_loss += svi.step(x, False, 5)
@@ -245,6 +265,11 @@ def train(svi, train_unlab_loader, train_lab_loader, use_cuda=False):
 
 ########################################################################
 
+##################
+# train function
+##################
+
+# this fn will not update the parameters
 def evaluate(svi, test_loader, use_cuda=False):
     # initialize loss accumulator
     test_loss = 0.
@@ -261,7 +286,10 @@ def evaluate(svi, test_loader, use_cuda=False):
 
 ########################################################################
 
-# plot elbo
+##############################
+# function for plotting elbo
+##############################
+
 def plot_elbo(elbo, data_type, freq):
 	plt.plot([freq * i for i in range(len(elbo))], elbo)
 	plt.xlabel("Number of Epochs")
@@ -272,6 +300,10 @@ def plot_elbo(elbo, data_type, freq):
 	plt.show()
 
 ########################################################################
+
+##################
+# set parameters
+##################
 
 # Run options
 # LEARNING_RATE = 1.0e-3
@@ -284,6 +316,10 @@ NUM_EPOCHS = 10
 TEST_FREQUENCY = 5
 
 ########################################################################
+
+########
+# main
+########
 
 train_unlab_loader, train_lab_loader, val_loader, test_loader = ckd_setup_data_loaders(batch_size=3, use_cuda=USE_CUDA)
 
