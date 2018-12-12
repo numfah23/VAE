@@ -8,7 +8,7 @@ import torchvision.transforms as transforms
 
 import pyro
 import pyro.distributions as dist
-# from pyro.infer import SVI, Trace_ELBO
+from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import Adam
 
 # add importing more packages
@@ -17,12 +17,6 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-# might not need these, but added from ss
-import argparse
-from visdom import Visdom
-from pyro.contrib.examples.util import print_and_log
-from pyro.infer import SVI, JitTrace_ELBO, JitTraceEnum_ELBO, Trace_ELBO, TraceEnum_ELBO, config_enumerate
-# 
 ########################################################################
 
 pyro.enable_validation(True)
@@ -84,8 +78,11 @@ class Decoder(nn.Module):
         # setup the non-linearities
         self.softplus = nn.Softplus()
 
+        self.input_size = input_size
+
     def forward(self, z):
-        x = x.reshape(-1, input_size)
+        # x = x.reshape(-1, self.input_size)
+        z = torch.cat((z[0].view(z[0].numel()), z[1].view(z[1].numel())))
 
         # define the forward computation on the latent z
         # first compute the hidden units
@@ -112,10 +109,13 @@ class Encoder_Z(nn.Module):
         # setup the non-linearities
         self.softplus = nn.Softplus()
 
+        self.input_size = input_size
+
     def forward(self, x):
         # define the forward computation on the data x
         # shape the mini-batch to be in rightmost dimension
-        x = x.reshape(-1, input_size)
+        # x = x.reshape(-1, self.input_size)
+        x = torch.cat((x[0].view(x[0].numel()), x[1].view(x[1].numel())))
         # then compute the hidden units
         hidden = self.softplus(self.fc1(x))
         # then return a mean vector and a (positive) square root covariance
@@ -140,10 +140,12 @@ class Encoder_Y(nn.Module):
         self.softplus = nn.Softplus()
         self.sigmoid = nn.Sigmoid()
 
+        self.input_size = input_size
+
     def forward(self, x):
         # define the forward computation on the data x
         # shape the mini-batch to be in rightmost dimension
-        x = x.reshape(-1, input_size)
+        # x = x.reshape(-1, self.input_size)
         # then compute the hidden units
         hidden = self.softplus(self.fc1(x))
         # then return a vector of probs used as parameters for
@@ -183,7 +185,8 @@ class SSVAE(nn.Module):
         # can pass in ys as labels or not pass in anything for unlabelled
         # register PyTorch module `decoder` with Pyro
         pyro.module("decoder", self.decoder)
-        with pyro.plate("data"):
+        # with pyro.plate("data"):
+        with pyro.iarange("data", xs.shape[0]):
             # setup hyperparameters for prior p(z)
             z_loc = xs.new_zeros(torch.Size((xs.shape[0], self.z_dim)))
             z_scale = xs.new_ones(torch.Size((xs.shape[0], self.z_dim)))
@@ -208,7 +211,8 @@ class SSVAE(nn.Module):
         # register PyTorch module `encoder` with Pyro
         pyro.module("encoder_y", self.encoder_y)
         pyro.module("encoder_z", self.encoder_z)
-        with pyro.plate("data"):
+        # with pyro.plate("data"):
+        with pyro.iarange("data", xs.shape[0]):
             # if no label y, sample and score digit with q(y|x) = cat(alpha(x))
             if ys is None:
                 alpha = self.encoder_y.forward(xs)
@@ -217,7 +221,7 @@ class SSVAE(nn.Module):
             # sample and score z with variational distribution
                 # q(z|x,y) = normal(loc(x,y), scale(x,y))
             
-            z_loc, z_scale = self.encoder.forward([xs, ys])
+            z_loc, z_scale = self.encoder_z.forward([xs, ys])
             pyro.sample("z", dist.Normal(z_loc, z_scale).independent(1))
     
     ########################################################################
@@ -225,7 +229,8 @@ class SSVAE(nn.Module):
     def classifier(self, xs):
         # register PyTorch module `encoder` with Pyro
         pyro.module("encoder_y", self.encoder_y)
-        with pyro.plate("data"):
+        # with pyro.plate("data"):
+        with pyro.iarange("data", xs.shape[0]):
             alpha = self.encoder_y.forward(xs)
             # get index with max predicted class prob
             res, ind = torch.topk(alpha, 1)
@@ -241,7 +246,8 @@ class SSVAE(nn.Module):
     def model_classify(self, xs, ys=None):        
         # register PyTorch module `encoder` with Pyro
         pyro.module("encoder_y", self.encoder_y)
-        with pyro.plate("data"):
+        # with pyro.plate("data")
+        with pyro.iarange("data", xs.shape[0]):
             # this here is the extra term to yield an auxiliary loss that we do gradient descent on
             if ys is not None:
                 alpha = self.encoder_y.forward(xs)
@@ -253,27 +259,23 @@ class SSVAE(nn.Module):
         pass
 
 ########################################################################
-########################################################################
-### TODO: update to semi-supervised below this line 
-########################################################################
-########################################################################
 
 ##################
 # train function
 ##################
 
 def train(svi, train_unlab_loader, train_lab_loader, use_cuda=False):
-    # initialize loss accumulator
-    epoch_loss = 0.
+    # initialize loss accumulator (separate for unlab and lab)
+    epoch_loss_unlab = 0.
+    epoch_loss_lab = 0.
     # do a training epoch over each mini-batch x returned by the data loader
-
     # modified to account for train_loader only having 1 item (also test_loader)
     for x in train_unlab_loader:
         # if on GPU put mini-batch into CUDA memory
         if use_cuda:
             x = x.cuda()
         # do ELBO gradient and accumulate loss
-        epoch_loss += svi.step(x, True, None)
+        epoch_loss_unlab += svi.step(x)
 
     # added another for loop for labelled data
     # keep track of which labels (*first 120 are 0, last 120 are 5*)
@@ -284,16 +286,20 @@ def train(svi, train_unlab_loader, train_lab_loader, use_cuda=False):
             x = x.cuda()
 
         # if first half, pass in 0 into step otherwise 5
+        # manually pass in labels for now; add in train_labels later
         if count < 120:
-            epoch_loss += svi.step(x, False, 0)
+            ys = torch.Tensor([0,0,0])
         else:
-            epoch_loss += svi.step(x, False, 5)
+            ys = torch.Tensor([5,5,5])
+        epoch_loss_lab += svi.step(x,ys)
         count += 1
 
     # return epoch loss
-    normalizer_train = len(train_unlab_loader.dataset) + len(train_lab_loader.dataset)
-    total_epoch_loss_train = epoch_loss / normalizer_train
-    return total_epoch_loss_train
+    normalizer_train_unlab = len(train_unlab_loader.dataset)
+    normalizer_train_lab = len(train_lab_loader.dataset)
+    total_epoch_loss_train_unlab = epoch_loss_unlab / normalizer_train_unlab
+    total_epoch_loss_train_lab = epoch_loss_lab / normalizer_train_lab
+    return total_epoch_loss_train_unlab, total_epoch_loss_train_lab
 
 ########################################################################
 
@@ -311,7 +317,7 @@ def evaluate(svi, test_loader, use_cuda=False):
         if use_cuda:
             x = x.cuda()
         # compute ELBO estimate and accumulate loss
-        test_loss += svi.evaluate_loss(x, True, None)
+        test_loss += svi.evaluate_loss(x)
     normalizer_test = len(test_loader.dataset)
     total_epoch_loss_test = test_loss / normalizer_test
     return total_epoch_loss_test
@@ -359,26 +365,29 @@ train_unlab_loader, train_lab_loader, val_loader, test_loader = ckd_setup_data_l
 pyro.clear_param_store()
 
 # setup the VAE
-vae = VAE(use_cuda=USE_CUDA)
+ssvae = SSVAE(use_cuda=USE_CUDA)
 
 # setup the optimizer
 adam_args = {"lr": LEARNING_RATE}
 optimizer = Adam(adam_args)
 
 # setup the inference algorithm
-svi = SVI(vae.model, vae.guide, optimizer, loss=Trace_ELBO())
+svi = SVI(ssvae.model, ssvae.guide, optimizer, loss=Trace_ELBO())
 # trace elbo: bbvi to max elbo (don't have to do integral)
 # gradient as expectation of another gradient (noisy gradient of elbo)
 
 # reparameterization trick: for backprop over random variable (only need for encoder)
 
-train_elbo = []
+train_unlab_elbo = []
+train_lab_elbo = []
 test_elbo = []
 # training loop
 for epoch in range(NUM_EPOCHS):
-    total_epoch_loss_train = train(svi, train_unlab_loader, train_lab_loader, use_cuda=USE_CUDA)
-    train_elbo.append(-total_epoch_loss_train)
-    print("[epoch %03d]  average training loss: %.4f" % (epoch, total_epoch_loss_train))
+    total_epoch_loss_train_unlab, total_epoch_loss_train_lab = train(svi, train_unlab_loader, train_lab_loader, use_cuda=USE_CUDA)
+    train_unlab_elbo.append(-total_epoch_loss_train_unlab)
+    train_lab_elbo.append(-total_epoch_loss_train_lab)
+    print("[epoch %03d]  average unlabelled training loss: %.4f" % (epoch, total_epoch_loss_train_unlab))
+    print("[epoch %03d]  average labelled training loss: %.4f" % (epoch, total_epoch_loss_train_lab))
 
     if epoch % TEST_FREQUENCY == 0:
         # report test diagnostics
@@ -392,33 +401,49 @@ plot_elbo(train_elbo, "train", 1)
 plot_elbo(test_elbo, "test", TEST_FREQUENCY)
 
 ########################################################################
+########################################################################
+### TODO: update to semi-supervised below this line 
+## fix error size mismatch (due to minibatches of size 3)
+    # size mismatch, m1: [1 x 4023], m2: [1341 x 400]
+    # 1341*3 = 4023
+
+    # ex input to decoder:
+    # [z, ys] = [tensor([[3.0920],
+    #         [2.8654],
+    #         [2.9456]]), tensor([0., 0., 0.])]
+
+    # want 3 rows 2 cols?
+########################################################################
+########################################################################
+
+
 # get severity scores for test data
-test_preds = []
-for x in test_loader:
-    z_loc, z_scale = vae.encoder(x)
-    z = dist.Normal(z_loc, z_scale).sample()
-    test_preds.append(np.array(z))
+# test_preds = []
+# for x in test_loader:
+#     z_loc, z_scale = vae.encoder(x)
+#     z = dist.Normal(z_loc, z_scale).sample()
+#     test_preds.append(np.array(z))
 
-test_preds_np = np.concatenate(test_preds).ravel()
-test_labels_np = np.genfromtxt('../final_data_labels/test_labels.csv', delimiter=',')
+# test_preds_np = np.concatenate(test_preds).ravel()
+# test_labels_np = np.genfromtxt('../final_data_labels/test_labels.csv', delimiter=',')
 
-# plot against CKD stage
-plt.scatter(test_labels_np, test_preds_np)
-plt.show()
+# # plot against CKD stage
+# plt.scatter(test_labels_np, test_preds_np)
+# plt.show()
 
 
-# repeat for val data
-val_preds = []
-for x in val_loader:
-    z_loc, z_scale = vae.encoder(x)
-    z = dist.Normal(z_loc, z_scale).sample()
-    val_preds.append(np.array(z))
+# # repeat for val data
+# val_preds = []
+# for x in val_loader:
+#     z_loc, z_scale = vae.encoder(x)
+#     z = dist.Normal(z_loc, z_scale).sample()
+#     val_preds.append(np.array(z))
 
-val_preds_np = np.concatenate(val_preds).ravel()
-# try val instead
-val_labels_np = np.genfromtxt('../final_data_labels/val_labels.csv', delimiter=',')
+# val_preds_np = np.concatenate(val_preds).ravel()
+# # try val instead
+# val_labels_np = np.genfromtxt('../final_data_labels/val_labels.csv', delimiter=',')
 
-plt.scatter(val_labels_np, val_preds_np)
-plt.show()
+# plt.scatter(val_labels_np, val_preds_np)
+# plt.show()
 
 
