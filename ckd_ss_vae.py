@@ -82,7 +82,8 @@ class Decoder(nn.Module):
 
     def forward(self, z):
         # x = x.reshape(-1, self.input_size)
-        z = torch.cat((z[0].view(z[0].numel()), z[1].view(z[1].numel())))
+        # z = torch.cat((z[0].view(z[0].numel()), z[1].view(z[1].numel())))
+        z = torch.cat((z[0], z[1]), dim=1)
 
         # define the forward computation on the latent z
         # first compute the hidden units
@@ -115,7 +116,9 @@ class Encoder_Z(nn.Module):
         # define the forward computation on the data x
         # shape the mini-batch to be in rightmost dimension
         # x = x.reshape(-1, self.input_size)
-        x = torch.cat((x[0].view(x[0].numel()), x[1].view(x[1].numel())))
+        # x = torch.cat((x[0].view(x[0].numel()), x[1].view(x[1].numel())))
+        x = torch.cat((x[0], x[1]), dim=1)
+
         # then compute the hidden units
         hidden = self.softplus(self.fc1(x))
         # then return a mean vector and a (positive) square root covariance
@@ -201,7 +204,7 @@ class SSVAE(nn.Module):
 
 
             # decoder outputs mean and sqroot cov, sample from normal
-            recon_loc, recon_scale = self.decoder.forward([zs, yz])
+            recon_loc, recon_scale = self.decoder.forward([zs, ys])
             pyro.sample("x", dist.Normal(recon_loc, recon_scale).independent(1), obs=xs.reshape(-1, 1335))
             
     ########################################################################
@@ -288,9 +291,9 @@ def train(svi, train_unlab_loader, train_lab_loader, use_cuda=False):
         # if first half, pass in 0 into step otherwise 5
         # manually pass in labels for now; add in train_labels later
         if count < 120:
-            ys = torch.Tensor([0,0,0])
+            ys = torch.Tensor([[1,0,0,0,0,0],[1,0,0,0,0,0],[1,0,0,0,0,0]])
         else:
-            ys = torch.Tensor([5,5,5])
+            ys = torch.Tensor([[0,0,0,0,0,1],[0,0,0,0,0,1],[0,0,0,0,0,1]])
         epoch_loss_lab += svi.step(x,ys)
         count += 1
 
@@ -413,6 +416,9 @@ plot_elbo(test_elbo, "test", TEST_FREQUENCY)
     #         [2.9456]]), tensor([0., 0., 0.])]
 
     # want 3 rows 2 cols?
+
+    # read in labels for test/val/train lab
+    # might want to onehot labels?
 ########################################################################
 ########################################################################
 
