@@ -165,7 +165,7 @@ class Encoder_Y(nn.Module):
 class SSVAE(nn.Module):
     # added output_size for the dimensions of y (ckd stages 0 to 5)
     # also added input_size for the dimensions of x (lab values)
-    def __init__(self, z_dim=1, hidden_dim=400, use_cuda=False, output_size=6, input_size=1335):
+    def __init__(self, z_dim=1, hidden_dim=400, use_cuda=False, output_size=7, input_size=1335):
         super(SSVAE, self).__init__()
         # create the encoder and decoder networks
         self.encoder_y = Encoder_Y(input_size, hidden_dim, output_size)
@@ -281,7 +281,17 @@ def train(svi, train_unlab_loader, train_lab_loader, use_cuda=False):
         epoch_loss_unlab += svi.step(x)
 
     # added another for loop for labelled data
-    # keep track of which labels (*first 120 are 0, last 120 are 5*)
+
+    # read in data labels
+    train_lab_labels = np.genfromtxt('../train_data_lab_labels.csv', delimiter=',')
+
+    def one_hot(x):
+        one_hot_d = {0:[1,0,0,0,0,0,0], 1:[0,1,0,0,0,0,0], 2:[0,0,1,0,0,0,0], 3:[0,0,0,1,0,0,0],
+                        4:[0,0,0,0,1,0,0], 5:[0,0,0,0,0,1,0], 6:[0,0,0,0,0,0,1]}
+        return one_hot_d[x]
+
+    train_lab_labels = np.array(map(one_hot, train_lab_labels))
+
     count = 0
     for x in train_lab_loader:
         # if on GPU put mini-batch into CUDA memory
@@ -290,12 +300,15 @@ def train(svi, train_unlab_loader, train_lab_loader, use_cuda=False):
 
         # if first half, pass in 0 into step otherwise 5
         # manually pass in labels for now; add in train_labels later
-        if count < 120:
-            ys = torch.Tensor([[1,0,0,0,0,0],[1,0,0,0,0,0],[1,0,0,0,0,0]])
-        else:
-            ys = torch.Tensor([[0,0,0,0,0,1],[0,0,0,0,0,1],[0,0,0,0,0,1]])
+        # if count < 120:
+        #     ys = torch.Tensor([[1,0,0,0,0,0],[1,0,0,0,0,0],[1,0,0,0,0,0]])
+        # else:
+        #     ys = torch.Tensor([[0,0,0,0,0,1],[0,0,0,0,0,1],[0,0,0,0,0,1]])
+
+        ys = torch.FloatTensor(train_lab_labels[count:count+3])
+
         epoch_loss_lab += svi.step(x,ys)
-        count += 1
+        count += 3
 
     # return epoch loss
     normalizer_train_unlab = len(train_unlab_loader.dataset)
@@ -354,7 +367,7 @@ USE_CUDA = False
 # Run only for a single iteration for testing
 # NUM_EPOCHS = 1 if smoke_test else 1000
 NUM_EPOCHS = 10
-TEST_FREQUENCY = 5
+TEST_FREQUENCY = 2
 
 ########################################################################
 
@@ -400,56 +413,40 @@ for epoch in range(NUM_EPOCHS):
         print("[epoch %03d] average test loss: %.4f" % (epoch, total_epoch_loss_test))
 
 # plot elbo for training and testing data
-plot_elbo(train_elbo, "train", 1)
+plot_elbo(train_unlab_elbo, "train", 1)
+plot_elbo(train_lab_elbo, "train", 1)
 plot_elbo(test_elbo, "test", TEST_FREQUENCY)
 
-########################################################################
-########################################################################
-### TODO: update to semi-supervised below this line 
-## fix error size mismatch (due to minibatches of size 3)
-    # size mismatch, m1: [1 x 4023], m2: [1341 x 400]
-    # 1341*3 = 4023
-
-    # ex input to decoder:
-    # [z, ys] = [tensor([[3.0920],
-    #         [2.8654],
-    #         [2.9456]]), tensor([0., 0., 0.])]
-
-    # want 3 rows 2 cols?
-
-    # read in labels for test/val/train lab
-    # might want to onehot labels?
-########################################################################
-########################################################################
-
-
 # get severity scores for test data
-# test_preds = []
-# for x in test_loader:
-#     z_loc, z_scale = vae.encoder(x)
-#     z = dist.Normal(z_loc, z_scale).sample()
-#     test_preds.append(np.array(z))
+test_preds = []
+for x in test_loader:
+    alpha = ssvae.encoder_y(x)
+    res, ind = torch.topk(alpha, 1)
+    test_preds.append(np.asarray(ind))
 
-# test_preds_np = np.concatenate(test_preds).ravel()
-# test_labels_np = np.genfromtxt('../final_data_labels/test_labels.csv', delimiter=',')
+test_preds_np = np.concatenate(test_preds).ravel()
+test_labels_np = np.genfromtxt('../final_data_labels/test_labels.csv', delimiter=',')
 
 # # plot against CKD stage
-# plt.scatter(test_labels_np, test_preds_np)
-# plt.show()
+plt.scatter(test_labels_np, test_preds_np)
+plt.show()
 
 
 # # repeat for val data
-# val_preds = []
-# for x in val_loader:
-#     z_loc, z_scale = vae.encoder(x)
-#     z = dist.Normal(z_loc, z_scale).sample()
-#     val_preds.append(np.array(z))
+val_preds = []
+for x in val_loader:
+    alpha = ssvae.encoder_y(x)
+    res, ind = torch.topk(alpha, 1)
+    val_preds.append(np.asarray(ind))
 
-# val_preds_np = np.concatenate(val_preds).ravel()
-# # try val instead
-# val_labels_np = np.genfromtxt('../final_data_labels/val_labels.csv', delimiter=',')
+val_preds_np = np.concatenate(val_preds).ravel()
+# try val instead
+val_labels_np = np.genfromtxt('../final_data_labels/val_labels.csv', delimiter=',')
 
-# plt.scatter(val_labels_np, val_preds_np)
-# plt.show()
+plt.scatter(val_labels_np, val_preds_np)
+plt.show()
 
+########################################################################
+### TODO: figure out why labels mostly 1,3, 6 and why test elbo decreases
+########################################################################
 
