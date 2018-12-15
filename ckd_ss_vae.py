@@ -48,10 +48,10 @@ def ckd_setup_data_loaders(batch_size=39, use_cuda=False):
     # val_set = ckd_Dataset('../val_data_scaled.csv') 
     # test_set = ckd_Dataset('../test_data_scaled.csv') 
 
-    train_unlab_set = ckd_Dataset('../train_data_unlab.csv') 
-    train_lab_set = ckd_Dataset('../train_data_lab.csv') 
-    val_set = ckd_Dataset('../val_data.csv') 
-    test_set = ckd_Dataset('../test_data.csv') 
+    train_unlab_set = ckd_Dataset('../scaled_allclass/train_data_unlab_scaled.csv') 
+    train_lab_set = ckd_Dataset('../scaled_allclass/train_data_lab_scaled.csv') 
+    val_set = ckd_Dataset('../scaled_allclass/val_data_scaled.csv') 
+    test_set = ckd_Dataset('../scaled_allclass/test_data_scaled.csv') 
 
     train_unlab_loader = DataLoader(dataset=train_unlab_set,
         batch_size=batch_size, shuffle=True)
@@ -139,15 +139,11 @@ class Encoder_Z(nn.Module):
 # encoder Y network
 #####################
 class Encoder_Y(nn.Module):
-    def __init__(self, input_size, hidden_dim1, output_size):
-    # def __init__(self, input_size, hidden_dim1, hidden_dim2, hidden_dim3, output_size):
+    def __init__(self, input_size, hidden_dim, output_size):
         super(Encoder_Y, self).__init__()
         # setup the three linear transformations used
-        self.fc1 = nn.Linear(input_size, hidden_dim1)
-        # self.fc2 = nn.Linear(hidden_dim1, hidden_dim2)
-        # self.fc3 = nn.Linear(hidden_dim2, hidden_dim3)
-        # self.fc4 = nn.Linear(hidden_dim3, output_size)
-        self.fc4 = nn.Linear(hidden_dim1, output_size)
+        self.fc1 = nn.Linear(input_size, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_size)
         # setup the non-linearities
         self.softplus = nn.Softplus()
         self.sigmoid = nn.Sigmoid()
@@ -159,14 +155,11 @@ class Encoder_Y(nn.Module):
         # shape the mini-batch to be in rightmost dimension
         # x = x.reshape(-1, self.input_size)
         # then compute the hidden units
-        hidden1 = self.softplus(self.fc1(x))
-        # hidden2 = self.softplus(self.fc2(hidden1))
-        # hidden3 = self.softplus(self.fc3(hidden2))
+        hidden = self.softplus(self.fc1(x))
         # then return a vector of probs used as parameters for
             # sampling from a categorical distribution
         # each of size batch_size x output_size
-        # return self.sigmoid(self.fc4(hidden3))
-        return self.sigmoid(self.fc4(hidden1))
+        return self.sigmoid(self.fc2(hidden))
 
 ########################################################################
 
@@ -184,7 +177,6 @@ class SSVAE(nn.Module):
 
         super(SSVAE, self).__init__()
         # create the encoder and decoder networks
-        # self.encoder_y = Encoder_Y(input_size, 1024,512,64, output_size)
         self.encoder_y = Encoder_Y(input_size, hidden_dim, output_size)
         self.encoder_z = Encoder_Z(input_size+output_size, hidden_dim, z_dim)
         self.decoder = Decoder(z_dim+output_size, hidden_dim, input_size)
@@ -396,7 +388,7 @@ TEST_FREQUENCY = 5
 
 train_unlab_loader, train_lab_loader, val_loader, test_loader = ckd_setup_data_loaders(batch_size=3, use_cuda=USE_CUDA)
 # read in train data labels
-train_lab_labels = np.genfromtxt('../train_data_lab_labels.csv', delimiter=',')
+train_lab_labels = np.genfromtxt('../scaled_allclass/train_data_lab_labels.csv', delimiter=',')
 train_labels_bincount = np.bincount(train_lab_labels.astype(int))
 prior_probs = train_labels_bincount/float(sum(train_labels_bincount))
 
@@ -507,3 +499,30 @@ print calc_acc(train_preds_np, train_lab_labels)
 # check decoder format (append z and y?)
 ########################################################################
 
+# #######################################################################################
+# plot boxplot for test data predictions
+boxplot_data_t = []
+possible_labels = range(7)
+for l in possible_labels:
+    boxplot_data_t.append(test_preds_np[np.where(test_labels_np == l)[0]])
+
+plt.figure()
+plt.boxplot(boxplot_data_t)
+plt.xticks(range(1,8),["non CKD", "stage I", "stage II", "stage III", "stage IV", "stage V", "CKD NOS"])
+plt.ylabel("Predicted severity score")
+plt.title("Box plot of test predicted severity vs. actual stage")
+plt.show()
+
+#######################################################################################
+# plot boxplot for val data predictions
+boxplot_data = []
+possible_labels = range(7)
+for l in possible_labels:
+    boxplot_data.append(val_preds_np[np.where(val_labels_np == l)[0]])
+
+plt.figure()
+plt.boxplot(boxplot_data)
+plt.xticks(range(1,8),["non CKD", "stage I", "stage II", "stage III", "stage IV", "stage V", "CKD NOS"])
+plt.ylabel("Predicted severity score")
+plt.title("Box plot of val predicted severity vs. actual stage")
+plt.show()
