@@ -43,10 +43,15 @@ class ckd_Dataset(Dataset):
 ####################
 def ckd_setup_data_loaders(batch_size=39, use_cuda=False):
     # use scaled data (mean=0, cov=1)
-    train_unlab_set = ckd_Dataset('../train_data_unlab_scaled.csv') 
-    train_lab_set = ckd_Dataset('../train_data_lab_scaled.csv') 
-    val_set = ckd_Dataset('../val_data_scaled.csv') 
-    test_set = ckd_Dataset('../test_data_scaled.csv') 
+    # train_unlab_set = ckd_Dataset('../train_data_unlab_scaled.csv') 
+    # train_lab_set = ckd_Dataset('../train_data_lab_scaled.csv') 
+    # val_set = ckd_Dataset('../val_data_scaled.csv') 
+    # test_set = ckd_Dataset('../test_data_scaled.csv') 
+
+    train_unlab_set = ckd_Dataset('../train_data_unlab.csv') 
+    train_lab_set = ckd_Dataset('../train_data_lab.csv') 
+    val_set = ckd_Dataset('../val_data.csv') 
+    test_set = ckd_Dataset('../test_data.csv') 
 
     train_unlab_loader = DataLoader(dataset=train_unlab_set,
         batch_size=batch_size, shuffle=True)
@@ -134,11 +139,15 @@ class Encoder_Z(nn.Module):
 # encoder Y network
 #####################
 class Encoder_Y(nn.Module):
-    def __init__(self, input_size, hidden_dim, output_size):
+    def __init__(self, input_size, hidden_dim1, output_size):
+    # def __init__(self, input_size, hidden_dim1, hidden_dim2, hidden_dim3, output_size):
         super(Encoder_Y, self).__init__()
         # setup the three linear transformations used
-        self.fc1 = nn.Linear(input_size, hidden_dim)
-        self.fc21 = nn.Linear(hidden_dim, output_size)
+        self.fc1 = nn.Linear(input_size, hidden_dim1)
+        # self.fc2 = nn.Linear(hidden_dim1, hidden_dim2)
+        # self.fc3 = nn.Linear(hidden_dim2, hidden_dim3)
+        # self.fc4 = nn.Linear(hidden_dim3, output_size)
+        self.fc4 = nn.Linear(hidden_dim1, output_size)
         # setup the non-linearities
         self.softplus = nn.Softplus()
         self.sigmoid = nn.Sigmoid()
@@ -150,11 +159,14 @@ class Encoder_Y(nn.Module):
         # shape the mini-batch to be in rightmost dimension
         # x = x.reshape(-1, self.input_size)
         # then compute the hidden units
-        hidden = self.softplus(self.fc1(x))
+        hidden1 = self.softplus(self.fc1(x))
+        # hidden2 = self.softplus(self.fc2(hidden1))
+        # hidden3 = self.softplus(self.fc3(hidden2))
         # then return a vector of probs used as parameters for
             # sampling from a categorical distribution
         # each of size batch_size x output_size
-        return self.sigmoid(self.fc21(hidden))
+        # return self.sigmoid(self.fc4(hidden3))
+        return self.sigmoid(self.fc4(hidden1))
 
 ########################################################################
 
@@ -165,12 +177,19 @@ class Encoder_Y(nn.Module):
 class SSVAE(nn.Module):
     # added output_size for the dimensions of y (ckd stages 0 to 5)
     # also added input_size for the dimensions of x (lab values)
-    def __init__(self, z_dim=1, hidden_dim=400, use_cuda=False, output_size=7, input_size=1335):
+    # def __init__(self, z_dim=1, hidden_dim=400, use_cuda=False, output_size=7, input_size=1335, prior_probs=None):
+
+    # small hidden layer
+    def __init__(self, z_dim=1, hidden_dim=10, use_cuda=False, output_size=7, input_size=1335, prior_probs=None):
+
         super(SSVAE, self).__init__()
         # create the encoder and decoder networks
+        # self.encoder_y = Encoder_Y(input_size, 1024,512,64, output_size)
         self.encoder_y = Encoder_Y(input_size, hidden_dim, output_size)
         self.encoder_z = Encoder_Z(input_size+output_size, hidden_dim, z_dim)
         self.decoder = Decoder(z_dim+output_size, hidden_dim, input_size)
+        # set alpha to prior prob from train data labels
+        self.prior_probs = torch.FloatTensor(prior_probs)
 
         if use_cuda:
             # calling cuda() here will put all the parameters of
@@ -199,7 +218,11 @@ class SSVAE(nn.Module):
 
             # if there is a label y, sample from the constant prior
                 # otherwise, observe the value (i.e. score against constant prior)
-            alpha_prior = xs.new_ones(torch.Size((xs.shape[0], self.output_size))) / (1.0*self.output_size)
+            # alpha_prior = xs.new_ones(torch.Size((xs.shape[0], self.output_size))) / (1.0*self.output_size)
+            
+            # prior is the actual train data label distribution (not uniform)
+            alpha_prior = self.prior_probs.repeat(xs.shape[0],1)
+            
             ys = pyro.sample("y", dist.OneHotCategorical(alpha_prior), obs=ys)
 
 
@@ -267,7 +290,7 @@ class SSVAE(nn.Module):
 # train function
 ##################
 
-def train(svi, train_unlab_loader, train_lab_loader, use_cuda=False):
+def train(svi, train_unlab_loader, train_lab_loader, train_lab_labels, use_cuda=False):
     # initialize loss accumulator (separate for unlab and lab)
     epoch_loss_unlab = 0.
     epoch_loss_lab = 0.
@@ -281,10 +304,6 @@ def train(svi, train_unlab_loader, train_lab_loader, use_cuda=False):
         epoch_loss_unlab += svi.step(x)
 
     # added another for loop for labelled data
-
-    # read in data labels
-    train_lab_labels = np.genfromtxt('../train_data_lab_labels.csv', delimiter=',')
-
     def one_hot(x):
         one_hot_d = {0:[1,0,0,0,0,0,0], 1:[0,1,0,0,0,0,0], 2:[0,0,1,0,0,0,0], 3:[0,0,0,1,0,0,0],
                         4:[0,0,0,0,1,0,0], 5:[0,0,0,0,0,1,0], 6:[0,0,0,0,0,0,1]}
@@ -297,13 +316,6 @@ def train(svi, train_unlab_loader, train_lab_loader, use_cuda=False):
         # if on GPU put mini-batch into CUDA memory
         if use_cuda:
             x = x.cuda()
-
-        # if first half, pass in 0 into step otherwise 5
-        # manually pass in labels for now; add in train_labels later
-        # if count < 120:
-        #     ys = torch.Tensor([[1,0,0,0,0,0],[1,0,0,0,0,0],[1,0,0,0,0,0]])
-        # else:
-        #     ys = torch.Tensor([[0,0,0,0,0,1],[0,0,0,0,0,1],[0,0,0,0,0,1]])
 
         ys = torch.FloatTensor(train_lab_labels[count:count+3])
 
@@ -353,6 +365,13 @@ def plot_elbo(elbo, data_type, freq):
         plt.ylabel("ELBO for Testing Data")
     plt.show()
 
+#####################################
+# function for calculating accuracy
+#####################################
+
+def calc_acc(preds, labels):
+    return len(np.where(preds == labels)[0])/float(len(preds))
+
 ########################################################################
 
 ##################
@@ -366,8 +385,8 @@ USE_CUDA = False
 
 # Run only for a single iteration for testing
 # NUM_EPOCHS = 1 if smoke_test else 1000
-NUM_EPOCHS = 10
-TEST_FREQUENCY = 2
+NUM_EPOCHS = 40
+TEST_FREQUENCY = 5
 
 ########################################################################
 
@@ -376,12 +395,16 @@ TEST_FREQUENCY = 2
 ########
 
 train_unlab_loader, train_lab_loader, val_loader, test_loader = ckd_setup_data_loaders(batch_size=3, use_cuda=USE_CUDA)
+# read in train data labels
+train_lab_labels = np.genfromtxt('../train_data_lab_labels.csv', delimiter=',')
+train_labels_bincount = np.bincount(train_lab_labels.astype(int))
+prior_probs = train_labels_bincount/float(sum(train_labels_bincount))
 
 # clear param store
 pyro.clear_param_store()
 
 # setup the VAE
-ssvae = SSVAE(use_cuda=USE_CUDA)
+ssvae = SSVAE(use_cuda=USE_CUDA, prior_probs=prior_probs)
 
 # setup the optimizer
 adam_args = {"lr": LEARNING_RATE}
@@ -399,12 +422,14 @@ train_lab_elbo = []
 test_elbo = []
 # training loop
 for epoch in range(NUM_EPOCHS):
-    total_epoch_loss_train_unlab, total_epoch_loss_train_lab = train(svi, train_unlab_loader, train_lab_loader, use_cuda=USE_CUDA)
+    total_epoch_loss_train_unlab, total_epoch_loss_train_lab = train(svi, train_unlab_loader, train_lab_loader, train_lab_labels, use_cuda=USE_CUDA)
     train_unlab_elbo.append(-total_epoch_loss_train_unlab)
     train_lab_elbo.append(-total_epoch_loss_train_lab)
     print("[epoch %03d]  average unlabelled training loss: %.4f" % (epoch, total_epoch_loss_train_unlab))
     print("[epoch %03d]  average labelled training loss: %.4f" % (epoch, total_epoch_loss_train_lab))
 
+    # print("[epoch %03d] labelled training accuracy: %.4f" % (epoch, ))
+    
     if epoch % TEST_FREQUENCY == 0:
         # report test diagnostics
         # try val loader instead
@@ -421,32 +446,64 @@ plot_elbo(test_elbo, "test", TEST_FREQUENCY)
 test_preds = []
 for x in test_loader:
     alpha = ssvae.encoder_y(x)
-    res, ind = torch.topk(alpha, 1)
-    test_preds.append(np.asarray(ind))
+    # res, ind = torch.topk(alpha, 1)
+    preds = dist.Categorical(alpha).sample()
+    test_preds.append(np.asarray(preds))
 
 test_preds_np = np.concatenate(test_preds).ravel()
 test_labels_np = np.genfromtxt('../final_data_labels/test_labels.csv', delimiter=',')
 
 # # plot against CKD stage
-plt.scatter(test_labels_np, test_preds_np)
+plt.scatter(test_labels_np, test_preds_np, alpha=0.02)
 plt.show()
 
+# calc acc
+print calc_acc(test_preds_np, test_labels_np)
 
+########################################################################
 # # repeat for val data
 val_preds = []
 for x in val_loader:
     alpha = ssvae.encoder_y(x)
-    res, ind = torch.topk(alpha, 1)
-    val_preds.append(np.asarray(ind))
+    # res, ind = torch.topk(alpha, 1)
+    preds = dist.Categorical(alpha).sample()
+    val_preds.append(np.asarray(preds))
 
 val_preds_np = np.concatenate(val_preds).ravel()
 # try val instead
 val_labels_np = np.genfromtxt('../final_data_labels/val_labels.csv', delimiter=',')
 
-plt.scatter(val_labels_np, val_preds_np)
+plt.scatter(val_labels_np, val_preds_np, alpha=0.02)
 plt.show()
+
+# calc acc
+print calc_acc(val_preds_np, val_labels_np)
+
+########################################################################
+# # repeat for val data
+train_preds = []
+for x in train_lab_loader:
+    alpha = ssvae.encoder_y(x)
+    # res, ind = torch.topk(alpha, 1)
+    preds = dist.Categorical(alpha).sample()
+    train_preds.append(np.asarray(preds))
+
+train_preds_np = np.concatenate(train_preds).ravel()
+
+plt.scatter(train_preds_np, train_lab_labels, alpha=0.02)
+plt.show()
+
+# calc acc
+print calc_acc(train_preds_np, train_lab_labels)
+
 
 ########################################################################
 ### TODO: figure out why labels mostly 1,3, 6 and why test elbo decreases
+
+# to do:
+# calculate training labelled accuracy at each epoch
+# try different hidden layer sizes/number of hidden layers
+# try using unscaled data
+# check decoder format (append z and y?)
 ########################################################################
 

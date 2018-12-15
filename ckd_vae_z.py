@@ -142,7 +142,7 @@ class VAE(nn.Module):
     ###############################
     # define the model p(x|z)p(z)
     ###############################
-    def model(self, x, zs):
+    def model(self, x, zs=None):
         # register PyTorch module `decoder` with Pyro
         pyro.module("decoder", self.decoder)
         with pyro.iarange("data", x.shape[0]):
@@ -151,7 +151,7 @@ class VAE(nn.Module):
             z_loc = x.new_zeros(torch.Size((x.shape[0], self.z_dim)))
             z_scale = x.new_ones(torch.Size((x.shape[0], self.z_dim)))
 
-            if zs == None:
+            if zs is None:
                 # sample from prior (value will be sampled by guide when computing the ELBO)
                 z = pyro.sample("latent", dist.Normal(z_loc, z_scale).independent(1))
             
@@ -166,31 +166,18 @@ class VAE(nn.Module):
     ###########################################################
     # define the guide (i.e. variational distribution) q(z|x)
     ###########################################################
-    def guide(self, x, unlab, label):
+    def guide(self, x, zs=None):
         # register PyTorch module `encoder` with Pyro
         pyro.module("encoder", self.encoder)
         with pyro.iarange("data", x.shape[0]):
-            if unlab:
-                # use the encoder to get the parameters used to define q(z|x)
-                z_loc, z_scale = self.encoder.forward(x)
+            z_loc, z_scale = self.encoder.forward(x)
 
+            if zs is None:
                 # sample the latent code z
                 pyro.sample("latent", dist.Normal(z_loc, z_scale).independent(1))
+
+            ### for labelled data, observe label!
             else:
-                # still pass data through encoder then compare to label
-                z_loc, z_scale = self.encoder.forward(x)
-
-                #check if 0 or 5, replace with label
-                if label == 0:
-                    zs_loc = torch.Tensor([[-3],[-3],[-3]])
-                if label == 5:
-                    zs_loc = torch.Tensor([[3],[3],[3]])
-
-                zs_scale = torch.Tensor([[0.1],[0.1],[0.1]])
-
-                zs = dist.Normal(zs_loc, zs_scale).sample()
-                
-
                 pyro.sample("latent", dist.Normal(z_loc, z_scale).independent(1), obs=zs)
 
     #############################################
@@ -227,7 +214,7 @@ def train(svi, train_unlab_loader, train_lab_loader, train_lab_labels, use_cuda=
         if use_cuda:
             x = x.cuda()
         # do ELBO gradient and accumulate loss
-        epoch_loss += svi.step(x)
+        epoch_loss_unlab += svi.step(x)
 
     # added another for loop for labelled data
     count = 0
@@ -235,15 +222,18 @@ def train(svi, train_unlab_loader, train_lab_loader, train_lab_labels, use_cuda=
         # if on GPU put mini-batch into CUDA memory
         if use_cuda:
             x = x.cuda()
-        zs = torch.FloatTensor(train_lab_labels[count:count+3])
+        minib = x.shape[0]
+        zs = torch.FloatTensor(train_lab_labels[count:count+minib]).reshape(minib,1)
         
         epoch_loss_lab += svi.step(x,zs)
         count += 3
-
+    
     # return epoch loss
-    normalizer_train = len(train_unlab_loader.dataset) + len(train_lab_loader.dataset)
-    total_epoch_loss_train = epoch_loss / normalizer_train
-    return total_epoch_loss_train
+    normalizer_train_unlab = len(train_unlab_loader.dataset)
+    normalizer_train_lab = len(train_lab_loader.dataset)
+    total_epoch_loss_train_unlab = epoch_loss_unlab / normalizer_train_unlab
+    total_epoch_loss_train_lab = epoch_loss_lab / normalizer_train_lab
+    return total_epoch_loss_train_unlab, total_epoch_loss_train_lab
 
 ########################################################################
 
@@ -261,7 +251,7 @@ def evaluate(svi, test_loader, use_cuda=False):
         if use_cuda:
             x = x.cuda()
         # compute ELBO estimate and accumulate loss
-        test_loss += svi.evaluate_loss(x, True, None)
+        test_loss += svi.evaluate_loss(x)
     normalizer_test = len(test_loader.dataset)
     total_epoch_loss_test = test_loss / normalizer_test
     return total_epoch_loss_test
@@ -289,12 +279,12 @@ def plot_elbo(elbo, data_type, freq):
 
 # Run options
 # LEARNING_RATE = 1.0e-3
-LEARNING_RATE = 1.0e-6
+LEARNING_RATE = 1.0e-4
 USE_CUDA = False
 
 # Run only for a single iteration for testing
 # NUM_EPOCHS = 1 if smoke_test else 1000
-NUM_EPOCHS = 10
+NUM_EPOCHS = 40
 TEST_FREQUENCY = 5
 
 ########################################################################
@@ -324,8 +314,10 @@ svi = SVI(vae.model, vae.guide, optimizer, loss=Trace_ELBO())
 
 # reparameterization trick: for backprop over random variable (only need for encoder)
 
-train_elbo = []
+train_unlab_elbo = []
+train_lab_elbo = []
 test_elbo = []
+
 # training loop
 for epoch in range(NUM_EPOCHS):
     # add unlab
@@ -343,10 +335,21 @@ for epoch in range(NUM_EPOCHS):
         print("[epoch %03d] average test loss: %.4f" % (epoch, total_epoch_loss_test))
 
 # plot elbo for training and testing data
-plot_elbo(train_elbo, "train", 1)
+plot_elbo(train_unlab_elbo, "train", 1)
+plot_elbo(train_lab_elbo, "train", 1)
 plot_elbo(test_elbo, "test", TEST_FREQUENCY)
 
 ########################################################################
+########################################################################
+########################################################################
+########################################################################
+
+# TODO: restructure testing/val
+    # get predictions, then calc acc, then make scatter + boxplots in fns
+    # try diff learning rates
+    # try diff num iters
+
+
 # get severity scores for test data
 test_preds = []
 for x in test_loader:
@@ -374,4 +377,32 @@ val_preds_np = np.concatenate(val_preds).ravel()
 val_labels_np = np.genfromtxt('../final_data_labels/val_labels.csv', delimiter=',')
 
 plt.scatter(val_labels_np, val_preds_np)
+plt.show()
+
+# #######################################################################################
+# plot boxplot for test data predictions
+boxplot_data_t = []
+possible_labels = range(7)
+for l in possible_labels:
+    boxplot_data_t.append(test_preds_np[np.where(test_labels_np == l)[0]])
+
+plt.figure()
+plt.boxplot(boxplot_data_t)
+plt.xticks(range(1,8),["non CKD", "stage I", "stage II", "stage III", "stage IV", "stage V", "CKD NOS"])
+plt.ylabel("Predicted severity score")
+plt.title("Box plot of test predicted severity vs. actual stage")
+plt.show()
+
+#######################################################################################
+# plot boxplot for val data predictions
+boxplot_data = []
+possible_labels = range(7)
+for l in possible_labels:
+    boxplot_data.append(val_preds_np[np.where(val_labels_np == l)[0]])
+
+plt.figure()
+plt.boxplot(boxplot_data)
+plt.xticks(range(1,8),["non CKD", "stage I", "stage II", "stage III", "stage IV", "stage V", "CKD NOS"])
+plt.ylabel("Predicted severity score")
+plt.title("Box plot of val predicted severity vs. actual stage")
 plt.show()
