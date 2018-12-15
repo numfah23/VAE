@@ -279,12 +279,12 @@ def plot_elbo(elbo, data_type, freq):
 
 # Run options
 # LEARNING_RATE = 1.0e-3
-LEARNING_RATE = 1.0e-4
+LEARNING_RATE = 1.0e-6
 USE_CUDA = False
 
 # Run only for a single iteration for testing
 # NUM_EPOCHS = 1 if smoke_test else 1000
-NUM_EPOCHS = 40
+NUM_EPOCHS = 50
 TEST_FREQUENCY = 5
 
 ########################################################################
@@ -377,6 +377,18 @@ val_preds_np = np.concatenate(val_preds).ravel()
 val_labels_np = np.genfromtxt('../final_data_labels/val_labels.csv', delimiter=',')
 
 plt.scatter(val_labels_np, val_preds_np)
+plt.show()
+
+# predict train lab to check
+train_preds = []
+for x in train_lab_loader:
+    z_loc, z_scale = vae.encoder(x)
+    z = dist.Normal(z_loc, z_scale).sample()
+    train_preds.append(np.array(z))
+
+train_preds_np = np.concatenate(train_preds).ravel()
+
+plt.scatter(train_lab_labels, train_preds_np)
 plt.show()
 
 # #######################################################################################
